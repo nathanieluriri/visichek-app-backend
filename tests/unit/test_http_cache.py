@@ -51,9 +51,12 @@ def fake_cache():
     # Force non-testing env so middleware doesn't short-circuit.
     settings_mock = MagicMock()
     settings_mock.env = "development"
+    # Dirty-scope markers live in the real Redis; a marker left by another test
+    # (an integration write, say) would turn every read here into a BYPASS.
     with (
         patch("core.http_cache.cache_db", fake),
         patch("core.http_cache.get_settings", return_value=settings_mock),
+        patch("core.http_cache.is_scope_dirty", return_value=False),
     ):
         yield fake
 
@@ -154,6 +157,7 @@ def test_build_key_varies_with_auth_and_query() -> None:
             self.headers = _StubHeaders(
                 {"Authorization": auth, "X-Response-Case": case}
             )
+            self.cookies: dict[str, str] = {}
 
     r1 = _StubRequest("/v1/visitors", "", "Bearer aaa", "camel")
     r2 = _StubRequest("/v1/visitors", "", "Bearer bbb", "camel")
@@ -310,3 +314,51 @@ async def test_no_cache_header_skips_lookup(app, fake_cache) -> None:
     assert r.status_code == 200
     assert r.headers.get("x-cache") == "MISS"
     assert app.state.counter == 2, "no-cache must force the handler to run"
+
+
+@pytest.mark.asyncio
+async def test_cookie_session_never_shares_the_anonymous_cache(app, fake_cache) -> None:
+    """A cookie-authenticated read must not be served, or stored, under the anon scope."""
+    tokens = {
+        "tok-a": MagicMock(role="super_admin", userId="user-a", tenant_id="tenant-a"),
+        "tok-b": MagicMock(role="super_admin", userId="user-b", tenant_id="tenant-b"),
+    }
+
+    async def lookup(accessToken: str):
+        return tokens.get(accessToken)
+
+    with patch("core.http_cache.get_access_token_allow_expired", side_effect=lookup):
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            a = await client.get("/v1/visitors", cookies={"access_token": "tok-a"})
+            anon = await client.get("/v1/visitors")
+            b = await client.get("/v1/visitors", cookies={"access_token": "tok-b"})
+
+    assert a.headers.get("x-cache") == "MISS"
+    assert anon.headers.get("x-cache") == "MISS", (
+        "anonymous caller must not get tenant A's response"
+    )
+    assert b.headers.get("x-cache") == "MISS", (
+        "tenant B must not get tenant A's response"
+    )
+    assert app.state.counter == 3
+    assert any(k.startswith("httpcache:t:tenant-a:") for k in fake_cache.store)
+    assert any(k.startswith("httpcache:t:tenant-b:") for k in fake_cache.store)
+
+
+@pytest.mark.asyncio
+async def test_unknown_credential_is_not_cached(app, fake_cache) -> None:
+    """A credential that resolves to no token skips the cache instead of falling back to anon."""
+    with patch(
+        "core.http_cache.get_access_token_allow_expired", new_callable=AsyncMock
+    ) as m:
+        m.return_value = None
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            r = await client.get("/v1/visitors", cookies={"access_token": "stale"})
+
+    assert r.status_code == 200
+    assert "x-cache" not in r.headers
+    assert fake_cache.store == {}
