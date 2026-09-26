@@ -139,15 +139,26 @@ _LINKED_INVALIDATIONS: dict[str, tuple[str, ...]] = {
 }
 
 
+def _credential(request: Request) -> Optional[str]:
+    """The access token the auth layer will use: a Bearer header, else the auth cookie."""
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Bearer "):
+        return auth.split(" ", maxsplit=1)[1]
+    return request.cookies.get("access_token") or None
+
+
+class _UnresolvedCredential(Exception):
+    """A credential was sent but maps to no known token; such a request must not share the anon cache."""
+
+
 async def _resolve_scope(request: Request) -> str:
     """Determine the cache scope key from the auth context."""
-    auth = request.headers.get("Authorization", "")
-    if not auth.startswith("Bearer "):
+    token = _credential(request)
+    if not token:
         return "anon"
-    token = auth.split(" ", maxsplit=1)[1]
     access_token = await get_access_token_allow_expired(accessToken=token)
     if not access_token:
-        return "anon"
+        raise _UnresolvedCredential()
 
     role = (access_token.role or "").lower()
     user_id = getattr(access_token, "userId", None) or "unknown"
@@ -161,14 +172,15 @@ async def _resolve_scope(request: Request) -> str:
         return f"adm:{user_id}"
     if role == "user":
         return f"usr:{user_id}"
-    return "anon"
+    raise _UnresolvedCredential()
 
 
 def _build_key(scope: str, resource: str, request: Request) -> str:
     case = request.headers.get("X-Response-Case", "camel").strip().lower()
-    auth = request.headers.get("Authorization", "")
     fingerprint = hashlib.sha256(
-        "|".join([request.url.path, request.url.query, case, auth]).encode("utf-8")
+        "|".join(
+            [request.url.path, request.url.query, case, _credential(request) or ""]
+        ).encode("utf-8")
     ).hexdigest()
     return f"{CACHE_PREFIX}:{scope}:{resource}:{fingerprint}"
 

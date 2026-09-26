@@ -189,13 +189,52 @@ _INDEX_PLAN: list[tuple[str, list[tuple[str, int]], dict[str, Any]]] = [
         [("tenant_id", ASCENDING), ("source_system_user_id", ASCENDING)],
         {"sparse": True},
     ),
+    # Visitor lookups at the kiosk match on phone (or email) within a tenant.
+    ("visitors", [("tenant_id", ASCENDING), ("phone", ASCENDING)], {}),
+    ("visitors", [("tenant_id", ASCENDING), ("email", ASCENDING)], {}),
+    # Visit sessions carry check_in_time, status and host_id; these three lived
+    # on ``visitors`` by mistake, where none of the fields exist.
     (
-        "visitors",
+        "visit_sessions",
         [("tenant_id", ASCENDING), ("check_in_time", DESCENDING)],
         {},
     ),
-    ("visitors", [("tenant_id", ASCENDING), ("status", ASCENDING)], {}),
-    ("visitors", [("tenant_id", ASCENDING), ("host_user_id", ASCENDING)], {}),
+    ("visit_sessions", [("tenant_id", ASCENDING), ("status", ASCENDING)], {}),
+    ("visit_sessions", [("tenant_id", ASCENDING), ("host_id", ASCENDING)], {}),
+    # Check-ins: the reception queue (tenant + state, newest first), the
+    # awaiting-checkout list (tenant + state by approval time), date-range
+    # analytics, and the in-flight duplicate guard per visitor.
+    (
+        "checkins",
+        [("tenant_id", ASCENDING), ("state", ASCENDING), ("date_created", DESCENDING)],
+        {},
+    ),
+    (
+        "checkins",
+        [("tenant_id", ASCENDING), ("state", ASCENDING), ("approved_at", DESCENDING)],
+        {},
+    ),
+    ("checkins", [("tenant_id", ASCENDING), ("date_created", DESCENDING)], {}),
+    (
+        "checkins",
+        [("tenant_id", ASCENDING), ("visitor_id", ASCENDING), ("state", ASCENDING)],
+        {},
+    ),
+    (
+        "consent_records",
+        [("tenant_id", ASCENDING), ("consent_timestamp", DESCENDING)],
+        {},
+    ),
+    ("consent_records", [("tenant_id", ASCENDING), ("visitor_id", ASCENDING)], {}),
+    (
+        "expected_appointments",
+        [("tenant_id", ASCENDING), ("scheduled_datetime", DESCENDING)],
+        {},
+    ),
+    # /v1/jobs/{task_id} is polled after every queued write.
+    ("queue_job_log", [("task_id", ASCENDING)], {}),
+    ("queue_job_log", [("tenant_id", ASCENDING), ("date_created", DESCENDING)], {}),
+    ("queue_job_log", [("actor_id", ASCENDING), ("date_created", DESCENDING)], {}),
     (
         "visitor_profiles",
         [("tenant_id", ASCENDING), ("email_normalized", ASCENDING)],
